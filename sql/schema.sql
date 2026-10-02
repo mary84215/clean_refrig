@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS food (
     user_id             VARCHAR(64) NOT NULL,
     category            VARCHAR(50) NOT NULL,
     food_name           VARCHAR(100) NOT NULL,
-    create_date         DATE NOT NULL,
+    create_date         DATE NULL,
     valid_date          DATE NOT NULL,
     days_left_to_notify INT NOT NULL,
     created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

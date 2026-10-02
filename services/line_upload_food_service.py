@@ -1,10 +1,11 @@
 """LINE 聊天機器人的食物登錄流程
 
 流程 A（圖片）：
-  使用者傳圖 → 辨識圖片中的食品資訊 → 回覆辨識結果 + 一行可複製的「登錄指令」
+  使用者傳圖 → 辨識圖片中的食品資訊 → 回覆辨識結果 + 一則可複製的「登錄指令」
 
 流程 B（文字）：
-  使用者貼上「登錄 魚 鮭魚 2025-01-01 2026-02-02 3」→ 解析文字 → 寫入 DB → 回覆成功/失敗
+  使用者貼上登錄指令（每個欄位一行：登錄 / 分類 / 品名 / 製造日 / 有效日期 / 提醒天數）
+  → 解析文字 → 寫入 DB → 回覆成功/失敗
 
 不經過 LINE 的測試 API 見 route/test_api.py
 """
@@ -45,17 +46,19 @@ class LineUploadFoodService:
     USAGE_TEXT = (
         "📷 傳一張食品照片給我，我會幫你辨識。或是自行登錄\n"
         "\n"
-        "✍️ 登錄格式：\n登錄 <分類> <品名> <製造日> <有效日期> <提醒天數>\n"
+        "✍️ 登錄格式（每個欄位一行）：\n"
+        "登錄\n<分類>\n<品名>\n<製造日>\n<有效日期>\n<提醒天數>\n"
         "\n"
-        "例如：登錄 調味料 烤肉醬 2025-01-01 2026-02-02 3\n"
+        "例如：\n登錄\n調味料\n烤肉醬\n2025-01-01\n2026-02-02\n3\n"
         "\n"
-        "（*提醒天數＝到期前幾天提醒你）"
+        "（*製造日不知道可以保留 <製造日>；提醒天數＝到期前幾天提醒你）"
     )
 
     # 辨識結果預填的提醒天數，使用者可自行修改
     _DEFAULT_DAYS_LEFT_TO_NOTIFY = 3
 
     # 辨識不到的欄位在登錄指令裡的佔位字；使用者沒改就送出時，reply_for_text 會提示要改掉
+    # 例外：製造日可以保留 <製造日>，寫入 DB 時存 NULL
     _PLACEHOLDERS = {
         "category": "<分類>",
         "food_name": "<品名>",
@@ -68,10 +71,11 @@ class LineUploadFoodService:
     _CREATE_DATE = rf"(?:{_DATE}|{re.escape(_PLACEHOLDERS['create_date'])})"
     _VALID_DATE = rf"(?:{_DATE}|{re.escape(_PLACEHOLDERS['valid_date'])})"
 
-    # 登錄指令格式：登錄 <分類> <品名> <製造日> <有效期限> <到期前幾天提醒>
+    # 登錄指令格式：每個欄位一行（登錄 / 分類 / 品名 / 製造日 / 有效日期 / 提醒天數）
+    # 比對前會先去掉每行前後空白與空行；分類、品名可以含空白（例如「御茶園 日式麥茶」）
     _REGISTER_PATTERN = re.compile(
-        rf"^登錄\s+(?P<category>\S+)\s+(?P<food_name>\S+)\s+(?P<create_date>{_CREATE_DATE})"
-        rf"\s+(?P<valid_date>{_VALID_DATE})\s+(?P<days_left_to_notify>\d+)$"
+        rf"^登錄\n(?P<category>[^\n]+)\n(?P<food_name>[^\n]+)\n(?P<create_date>{_CREATE_DATE})\n"
+        rf"(?P<valid_date>{_VALID_DATE})\n(?P<days_left_to_notify>\d+)$"
     )
 
     _SYSTEM_PROMPT = """你現在是一個圖片文字辨識專家。幫我辨識圖片文字，並且判定與擷取以下資訊。辨識不到直接回傳空值。
@@ -144,18 +148,25 @@ class LineUploadFoodService:
             """登錄指令用：辨識不到填入佔位字，讓使用者自己改"""
             return values[key] or self._PLACEHOLDERS[key]
 
-        has_missing = any(v is None for v in values.values())
+        # 製造日可以保留佔位字，不算必須補的欄位
+        has_missing = any(values[key] is None for key in ("category", "food_name", "valid_date"))
 
         # 回覆兩則訊息：第二則只有指令本身，使用者長按就能整則複製
-        register_cmd = (
-            f"登錄 {filled('category')} {filled('food_name')} {filled('create_date')} {filled('valid_date')} "
-            f"{self._DEFAULT_DAYS_LEFT_TO_NOTIFY}"
-        )
+        register_cmd = "\n".join([
+            "登錄",
+            filled("category"),
+            filled("food_name"),
+            filled("create_date"),
+            filled("valid_date"),
+            str(self._DEFAULT_DAYS_LEFT_TO_NOTIFY),
+        ])
         hint = (
             "⚠️ 有欄位沒辨識到，請複製下一則訊息，把佔位字改成正確內容再傳給我 👇"
             if has_missing
             else "確認無誤請複製下一則訊息傳給我；有錯可以直接修改後再傳 👇"
         )
+        if values["create_date"] is None:
+            hint = f"（製造日沒辨識到，可以直接保留 {self._PLACEHOLDERS['create_date']}）\n{hint}"
         return [
             (
                 "🔍 辨識結果\n"
@@ -163,7 +174,7 @@ class LineUploadFoodService:
                 f"品名：{shown('food_name')}\n"
                 f"製造日：{shown('create_date')}\n"
                 f"有效期限：{shown('valid_date')}\n\n"
-                f"最後的數字是「到期前幾天提醒你」，預設 {self._DEFAULT_DAYS_LEFT_TO_NOTIFY} 天。\n"
+                f"登錄指令最後一行是「到期前幾天提醒你」，預設 {self._DEFAULT_DAYS_LEFT_TO_NOTIFY} 天。\n"
                 "\n"
                 f"{hint}"
             ),
@@ -180,7 +191,9 @@ class LineUploadFoodService:
         Return:
             list[str]: 要回覆的訊息（登錄成功、資料有誤或用法說明）
         """
-        match = self._REGISTER_PATTERN.match(text.strip())
+        # 去掉每行前後空白與空行，讓多打的空白或空行不影響比對
+        normalized = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        match = self._REGISTER_PATTERN.match(normalized)
         if not match:
             return [self.USAGE_TEXT]
 
@@ -188,10 +201,14 @@ class LineUploadFoodService:
         problems = [
             f"請將{placeholder}取代為實際內容"
             for key, placeholder in self._PLACEHOLDERS.items()
-            if fields[key] == placeholder
+            if key != "create_date" and fields[key] == placeholder
         ]
         if problems:
             return ["⚠️ 還有欄位沒填\n" + "\n".join(problems)]
+
+        # 製造日保留佔位字 → 存 NULL
+        if fields["create_date"] == self._PLACEHOLDERS["create_date"]:
+            fields["create_date"] = None
 
         try:
             # pymysql 是同步的，丟到 threadpool 避免卡住 event loop
@@ -245,14 +262,14 @@ class LineUploadFoodService:
         image_bytes = await file.read()
         return await self.parse_food_image_bytes(image_bytes, file.content_type)
 
-    def write_food_todb(self, user_id: str, category: str, food_name: str, create_date: date, valid_date: date, days_left_to_notify: int) -> int:
-        """驗證食物資料後寫入 DB；有效期限早於製造日會丟出 ValueError
+    def write_food_todb(self, user_id: str, category: str, food_name: str, create_date: date | None, valid_date: date, days_left_to_notify: int) -> int:
+        """驗證食物資料後寫入 DB；有效期限早於製造日會丟出 ValueError（沒有製造日時不檢查）
 
         Args:
             user_id: LINE 使用者 id
             category: 分類，例如「魚」
             food_name: 品名，例如「鮭魚」
-            create_date: 製造日
+            create_date: 製造日，不知道時為 None（DB 存 NULL）
             valid_date: 有效期限
             days_left_to_notify: 到期前幾天提醒
 
@@ -260,7 +277,7 @@ class LineUploadFoodService:
             int: 新增資料的 id
         """
         food = FoodCreate(user_id=user_id, category=category, food_name=food_name, create_date=create_date, valid_date=valid_date, days_left_to_notify = days_left_to_notify)
-        if food.valid_date < food.create_date:
+        if food.create_date is not None and food.valid_date < food.create_date:
             raise ValueError("valid_date must not be earlier than create_date")
         return self._insert_food(food)
 

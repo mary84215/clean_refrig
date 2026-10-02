@@ -7,7 +7,7 @@ class FoodCreate(BaseModel):
     user_id: str
     category: str
     food_name: str
-    create_date: date
+    create_date: date | None  # 不知道製造日時為 None（DB 存 NULL）
     valid_date: date
     days_left_to_notify: int
 
