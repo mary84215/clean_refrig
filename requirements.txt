@@ -1,0 +1,11 @@
+fastapi
+httpx
+pymysql
+tenacity
+uvicorn
+python-multipart
+line-bot-sdk
+python-dotenv
+google-genai
+apscheduler
+#ngrok
